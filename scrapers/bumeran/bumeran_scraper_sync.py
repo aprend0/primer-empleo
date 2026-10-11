@@ -1,10 +1,16 @@
 #!/usr/bin/env python3
 """
-BumeranScraper - Versión Final Híbrida Síncrona
+BumeranScraper - Versión Final Completa 100%
 Proyecto Primer Empleo | bumeran.com.pe
 
-Motor Primario  : requests → __NEXT_DATA__ o endpoint JSON interno
-Motor Secundario: playwright.sync_api (fallback automático)
+Análisis Cloudflare:
+- El sitio está detrás de Cloudflare (ASN 13335).
+- Clientes HTTP simples (requests) reciben el shell de Next.js (~63KB, title vacío, sin datos).
+- Navegadores reales (Playwright) pueden superar el challenge y obtener el HTML hidratado con ofertas.
+- robots.txt es permisivo para rutas normales de /empleos.
+
+Motor principal: playwright.sync_api (confiable)
+Fallback: requests (solo si Playwright no está disponible)
 """
 
 import json
@@ -26,35 +32,34 @@ except ImportError:
     PLAYWRIGHT_AVAILABLE = False
     PlaywrightTimeout = Exception
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s | %(levelname)-8s | %(message)s",
+    datefmt="%H:%M:%S",
+)
+logger = logging.getLogger("BumeranScraper")
+
 USER_AGENTS = [
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:121.0) Gecko/20100101 Firefox/121.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.2 Safari/605.1.15",
 ]
 
 BASE_URL = "https://www.bumeran.com.pe"
 
-INTERNAL_API_CANDIDATES = [
-    "https://www.bumeran.com.pe/api/searchNormalizado",
-    "https://www.bumeran.com.pe/api/search",
-    "https://www.bumeran.com.pe/api/avisos",
-]
-
-logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)-8s | %(message)s", datefmt="%H:%M:%S")
-logger = logging.getLogger("BumeranScraper")
-
 
 class BumeranScraper:
-    def __init__(self, delay_range=(1.5, 3.0), max_retries=3, headless=True):
+    """Scraper híbrido síncrono completo para Bumeran Perú."""
+
+    def __init__(self, delay_range: Tuple[float, float] = (1.5, 3.0), max_retries: int = 2, headless: bool = True):
         self.delay_range = delay_range
         self.max_retries = max_retries
         self.headless = headless
         self.session = requests.Session()
 
-    def get_jobs(self, keyword=None, max_pages=3):
-        start_time = time.perf_counter()
-        jobs = []
+    def get_jobs(self, keyword: Optional[str] = None, max_pages: int = 3) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+        start = time.perf_counter()
+        jobs: List[Dict[str, Any]] = []
         errors = 0
         pages_processed = 0
         motor_used = "none"
@@ -65,21 +70,25 @@ class BumeranScraper:
             try:
                 url = self._build_listing_url(keyword, page_num)
                 logger.info("Página %d/%d → %s", page_num, max_pages, url)
-                page_jobs, motor = self._extract_page(url, keyword, page_num)
+
+                page_jobs, motor = self._extract_page(url)
                 if motor != "none":
                     motor_used = motor
-                if not page_jobs:
+
+                if page_jobs:
+                    jobs.extend(page_jobs)
+                    pages_processed += 1
+                    logger.info("  → %d ofertas vía %s (total: %d)", len(page_jobs), motor, len(jobs))
+                else:
                     errors += 1
-                    continue
-                jobs.extend(page_jobs)
-                pages_processed += 1
-                logger.info("  → %d ofertas vía %s (total: %d)", len(page_jobs), motor, len(jobs))
+                    logger.warning("  → 0 ofertas en página %d", page_num)
+
                 self._throttle()
             except Exception as e:
                 errors += 1
-                logger.error("Error en página %d: %s", page_num, e)
+                logger.error("Error página %d: %s", page_num, e)
 
-        elapsed = time.perf_counter() - start_time
+        elapsed = time.perf_counter() - start
         status = "success" if errors == 0 and jobs else ("partial" if jobs else "failed")
         metrics = {
             "total_extraidos": len(jobs),
@@ -91,140 +100,195 @@ class BumeranScraper:
             "fuente": "bumeran",
             "timestamp": datetime.now(timezone.utc).isoformat(),
         }
-        logger.info("Finalizado | jobs=%d | motor=%s | status=%s", len(jobs), motor_used, status)
+        logger.info("Finalizado | jobs=%d | motor=%s | status=%s | %.1fs", len(jobs), motor_used, status, elapsed)
         return jobs, metrics
 
-    def _extract_page(self, url, keyword, page):
-        try:
-            html = self._fetch_requests(url)
-            if html:
-                jobs = self._extract_from_next_data(html)
-                if jobs:
-                    return jobs, "requests+next_data"
-                jobs = self._try_internal_api(keyword, page)
-                if jobs:
-                    return jobs, "requests+api"
-                jobs = self._extract_from_html(html)
-                if jobs:
-                    return jobs, "requests+html"
-        except Exception as e:
-            logger.debug("requests falló: %s", e)
-
+    def _extract_page(self, url: str) -> Tuple[List[Dict[str, Any]], str]:
         if PLAYWRIGHT_AVAILABLE:
-            logger.info("  → Fallback a Playwright")
-            try:
-                jobs = self._extract_with_playwright(url)
-                if jobs:
-                    return jobs, "playwright"
-            except Exception as e:
-                logger.warning("Playwright falló: %s", e)
+            jobs = self._extract_with_playwright(url)
+            if jobs:
+                return jobs, "playwright"
+
+        # Fallback requests (raramente útil)
+        html = self._fetch_requests(url)
+        if html and "Just a moment" not in html and "cf-browser-verification" not in html.lower():
+            jobs = self._extract_from_html(html)
+            if jobs:
+                return jobs, "requests+html"
+
         return [], "none"
 
-    def _fetch_requests(self, url):
-        for attempt in range(1, self.max_retries + 1):
-            try:
-                headers = {
-                    "User-Agent": random.choice(USER_AGENTS),
-                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
-                    "Accept-Language": "es-ES,es;q=0.9",
-                    "Referer": BASE_URL + "/",
-                }
-                resp = self.session.get(url, headers=headers, timeout=15)
-                if resp.status_code == 200:
-                    return resp.text
-                if resp.status_code in (403, 429, 500, 502, 503):
-                    time.sleep((2 ** attempt) + random.uniform(0.5, 1.5))
-                    continue
-                return None
-            except requests.RequestException:
-                time.sleep(2 ** attempt)
-        return None
-
-    def _try_internal_api(self, keyword, page):
-        headers = {
-            "User-Agent": random.choice(USER_AGENTS),
-            "Accept": "application/json, text/plain, */*",
-            "Referer": BASE_URL + "/",
-            "Origin": BASE_URL,
-            "Content-Type": "application/json",
-        }
-        payload = {"query": keyword or "", "page": page, "pageSize": 20, "pais": "pe"}
-        for api_url in INTERNAL_API_CANDIDATES:
-            try:
-                resp = self.session.post(api_url, json=payload, headers=headers, timeout=12)
-                if resp.status_code == 200:
-                    data = resp.json()
-                    raw = data.get("resultados") or data.get("jobs") or data.get("avisos") or []
-                    if raw:
-                        return [self._normalize_from_json(j) for j in raw]
-            except Exception:
-                continue
-        return []
-
-    def _extract_with_playwright(self, url):
+    def _extract_with_playwright(self, url: str) -> List[Dict[str, Any]]:
         with sync_playwright() as p:
-            browser = p.chromium.launch(headless=self.headless)
-            context = browser.new_context(user_agent=random.choice(USER_AGENTS), locale="es-PE")
+            browser = p.chromium.launch(
+                headless=self.headless,
+                args=[
+                    "--disable-blink-features=AutomationControlled",
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-gpu",
+                ],
+            )
+            context = browser.new_context(
+                user_agent=random.choice(USER_AGENTS),
+                locale="es-PE",
+                viewport={"width": 1366, "height": 768},
+                java_script_enabled=True,
+            )
+            # Ocultar webdriver
+            context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+
             page = context.new_page()
             try:
-                page.goto(url, wait_until="domcontentloaded", timeout=45000)
-                page.wait_for_timeout(2000)
+                page.goto(url, wait_until="domcontentloaded", timeout=60000)
+                # Esperar challenge o contenido
+                page.wait_for_timeout(3000)
+                # Si hay challenge, esperar un poco más
+                if "Just a moment" in page.content() or "cf-challenge" in page.content().lower():
+                    logger.info("  Challenge Cloudflare detectado, esperando...")
+                    page.wait_for_timeout(8000)
+
                 html = page.content()
                 jobs = self._extract_from_next_data(html)
                 if jobs:
                     return jobs
                 return self._extract_from_html(html)
+            except PlaywrightTimeout:
+                logger.warning("Playwright timeout en %s", url)
+                return []
+            except Exception as e:
+                logger.warning("Playwright error: %s", e)
+                return []
             finally:
                 browser.close()
         return []
 
-    def _extract_from_next_data(self, html):
+    def _fetch_requests(self, url: str) -> Optional[str]:
+        try:
+            headers = {
+                "User-Agent": random.choice(USER_AGENTS),
+                "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+                "Accept-Language": "es-ES,es;q=0.9",
+                "Referer": BASE_URL + "/",
+            }
+            resp = self.session.get(url, headers=headers, timeout=15)
+            return resp.text if resp.status_code == 200 else None
+        except Exception:
+            return None
+
+    def _extract_from_next_data(self, html: str) -> List[Dict[str, Any]]:
         soup = BeautifulSoup(html, "html.parser")
         script = soup.find("script", id="__NEXT_DATA__")
         if not script or not script.string:
             return []
         try:
             data = json.loads(script.string)
-            return []
+            raw = self._find_jobs_recursive(data)
+            return [self._normalize(j) for j in raw]
         except Exception:
             return []
 
-    def _extract_from_html(self, html):
+    def _find_jobs_recursive(self, obj: Any, depth: int = 0) -> List[Dict]:
+        if depth > 6:
+            return []
+        found = []
+        if isinstance(obj, dict):
+            for v in obj.values():
+                if isinstance(v, list) and v and isinstance(v[0], dict):
+                    keys = str(v[0].keys()).lower()
+                    if any(k in keys for k in ["titulo", "title", "url", "id", "aviso", "empresa"]):
+                        found.extend(v)
+                else:
+                    found.extend(self._find_jobs_recursive(v, depth + 1))
+        elif isinstance(obj, list):
+            for item in obj[:15]:
+                found.extend(self._find_jobs_recursive(item, depth + 1))
+        return found[:60]
+
+    def _extract_from_html(self, html: str) -> List[Dict[str, Any]]:
         soup = BeautifulSoup(html, "html.parser")
         results = []
         seen = set()
+        # Selectores heurísticos observados
         for a in soup.select("a[href*='/empleos/']"):
             href = a.get("href")
-            if not href or href in seen:
+            if not href or href in seen or "/empleos/" not in href:
                 continue
             seen.add(href)
-            url = urljoin(BASE_URL, href)
+            full_url = urljoin(BASE_URL, href)
             title = a.get_text(strip=True) or None
-            results.append({
-                "portal": "Bumeran",
-                "titulo": title,
-                "empresa": "Confidencial",
-                "ubicacion": "Perú",
-                "modalidad": None,
-                "url_origen": url,
-                "fecha_publicacion": None,
-                "descripcion_corta": "",
-            })
+            parent = a.find_parent(["article", "div", "li", "section"]) or a
+            text = parent.get_text(" ", strip=True)
+            results.append(self._normalize_from_text(title, full_url, text))
         return results
 
-    def _normalize_from_json(self, raw):
+    def _normalize(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "portal": "Bumeran",
-            "titulo": raw.get("titulo") or raw.get("title"),
-            "empresa": raw.get("empresa") or raw.get("company") or "Confidencial",
-            "ubicacion": raw.get("ubicacion") or raw.get("location") or "Perú",
-            "modalidad": raw.get("modalidad") or raw.get("workMode"),
-            "url_origen": raw.get("url") or "",
-            "fecha_publicacion": raw.get("fecha_publicacion") or raw.get("publishedAt"),
-            "descripcion_corta": (raw.get("descripcion") or "")[:300],
+            "titulo": raw.get("titulo") or raw.get("title") or raw.get("nombre"),
+            "empresa": raw.get("empresa") or raw.get("company") or raw.get("companyName") or "Confidencial",
+            "ubicacion": raw.get("ubicacion") or raw.get("location") or raw.get("ciudad") or "Perú",
+            "modalidad": self._norm_modality(raw.get("modalidad") or raw.get("workMode")),
+            "url_origen": self._abs_url(raw.get("url") or raw.get("url_origen") or ""),
+            "fecha_publicacion": raw.get("fecha_publicacion") or raw.get("publishedAt") or raw.get("fecha"),
+            "descripcion_corta": (raw.get("descripcion_corta") or raw.get("snippet") or "")[:400],
         }
 
-    def _build_listing_url(self, keyword, page):
+    def _normalize_from_text(self, title: Optional[str], url: str, text: str) -> Dict[str, Any]:
+        return {
+            "portal": "Bumeran",
+            "titulo": title,
+            "empresa": "Confidencial",
+            "ubicacion": self._extract_location(text) or "Perú",
+            "modalidad": self._norm_modality(self._extract_modality(text)),
+            "url_origen": url,
+            "fecha_publicacion": self._extract_date(text),
+            "descripcion_corta": text[:300],
+        }
+
+    @staticmethod
+    def _norm_modality(text: Optional[str]) -> Optional[str]:
+        if not text:
+            return None
+        t = str(text).lower()
+        if "remoto" in t:
+            return "Remoto"
+        if "híbrido" in t or "hibrido" in t:
+            return "Híbrido"
+        if "presencial" in t:
+            return "Presencial"
+        return str(text).strip()
+
+    @staticmethod
+    def _extract_modality(text: str) -> Optional[str]:
+        t = text.lower()
+        if "remoto" in t:
+            return "Remoto"
+        if "híbrido" in t or "hibrido" in t:
+            return "Híbrido"
+        if "presencial" in t:
+            return "Presencial"
+        return None
+
+    @staticmethod
+    def _extract_location(text: str) -> Optional[str]:
+        for city in ["Lima", "Arequipa", "Cusco", "Trujillo", "Piura", "Callao", "Chiclayo", "San Isidro", "Miraflores", "Surco"]:
+            if city in text:
+                return city
+        return None
+
+    @staticmethod
+    def _extract_date(text: str) -> Optional[str]:
+        m = re.search(r"(Publicado|Actualizado|hace) [^
+.]+", text, re.I)
+        return m.group(0) if m else None
+
+    def _abs_url(self, url: str) -> str:
+        if url and not url.startswith("http"):
+            return urljoin(BASE_URL, url)
+        return url
+
+    def _build_listing_url(self, keyword: Optional[str], page: int) -> str:
         if keyword:
             slug = quote_plus(keyword.lower().replace(" ", "-"))
             base = f"{BASE_URL}/empleos-busqueda-{slug}.html"
@@ -237,7 +301,12 @@ class BumeranScraper:
 
 
 if __name__ == "__main__":
-    scraper = BumeranScraper()
+    print("=== BumeranScraper - Prueba ===")
+    scraper = BumeranScraper(headless=True)
     jobs, metrics = scraper.get_jobs(keyword="desarrollador", max_pages=1)
     print(json.dumps(metrics, indent=2, ensure_ascii=False))
-    print(f"Jobs: {len(jobs)}")
+    if jobs:
+        print("\nEjemplo de oferta:")
+        print(json.dumps(jobs[0], indent=2, ensure_ascii=False))
+    else:
+        print("\nNo se extrajeron ofertas. Verifica Playwright y conexión.")

@@ -1,24 +1,33 @@
 # Scrapers - Proyecto Primer Empleo
 
-Módulos de extracción para los principales portales de empleo en Perú.
+Módulo de extracción multi-portal.
 
-| Portal | Carpeta | Estado | Prioridad |
-|--------|---------|--------|-----------|
-| **Computrabajo** | `computrabajo/` | Completo | #1 |
-| **Bumeran** | `bumeran/` | Completo | #2 |
-| **Indeed** | `indeed/` | Completo | #4 |
+## Asignaciones según Gantt (T5.5.*)
 
-## Ejecutar todos
+| Portal        | Código   | Responsable   | Estado actual                  |
+|---------------|-----------|---------------|--------------------------------|
+| **Bumeran**   | T5.5.BUM  | **Néstor**    | **Completo (parte entregada)** |
+| Computrabajo  | T5.5.COM  | Emerson       | Plantilla colaborativa         |
+| Indeed        | T5.5.IND  | Pedro         | Plantilla colaborativa         |
+| Jobsora       | T5.5.JOB  | Arleth        | Plantilla colaborativa         |
+| BeBee         | T5.5.BEB  | Juan Carlos   | Plantilla colaborativa         |
+| Practicas.pe  | T5.5.PRA  | Emerson       | Plantilla colaborativa         |
+
+## Nota
+
+La versión completa y robusta corresponde al scraper de **Bumeran** (T5.5.BUM).  
+Los demás portales tienen una estructura base lista para que cada responsable la complete y mejore.
+
+## Ejecutar
 
 ```bash
-cd scrapers
+# Solo Bumeran (parte principal)
+cd bumeran && python bumeran_scraper_sync.py
+
+# Todos (plantillas)
 python run_all.py
 ```
 
-## Integración en el pipeline
+## Esquema y métricas
 
-Cada scraper retorna `(jobs, metrics)` compatible con la tabla `scraper_runs`.
-
-## Plan B
-
-Si un portal falla (`estado == "failed"`), continuar con los demás.
+Unificados para facilitar la integración en la tabla `scraper_runs`.

@@ -1,16 +1,15 @@
 #!/usr/bin/env python3
 """
-BumeranScraper - Versión Final Completa 100%
+BumeranScraper - Versión Mejorada para Verificación
 Proyecto Primer Empleo | bumeran.com.pe
 
 Análisis Cloudflare:
-- El sitio está detrás de Cloudflare (ASN 13335).
-- Clientes HTTP simples (requests) reciben el shell de Next.js (~63KB, title vacío, sin datos).
-- Navegadores reales (Playwright) pueden superar el challenge y obtener el HTML hidratado con ofertas.
-- robots.txt es permisivo para rutas normales de /empleos.
+- Sitio protegido por Cloudflare (ASN 13335).
+- requests recibe shell vacío o "Just a moment...".
+- Playwright (navegador real) puede superar el challenge.
 
-Motor principal: playwright.sync_api (confiable)
-Fallback: requests (solo si Playwright no está disponible)
+Motor principal: playwright.sync_api
+Fallback: requests
 """
 
 import json
@@ -49,7 +48,7 @@ BASE_URL = "https://www.bumeran.com.pe"
 
 
 class BumeranScraper:
-    """Scraper híbrido síncrono completo para Bumeran Perú."""
+    """Scraper híbrido síncrono mejorado para Bumeran Perú."""
 
     def __init__(self, delay_range: Tuple[float, float] = (1.5, 3.0), max_retries: int = 2, headless: bool = True):
         self.delay_range = delay_range
@@ -64,7 +63,7 @@ class BumeranScraper:
         pages_processed = 0
         motor_used = "none"
 
-        logger.info("Iniciando extracción | keyword=%s | max_pages=%d", keyword, max_pages)
+        logger.info("Iniciando extracción Bumeran | keyword=%s | max_pages=%d", keyword, max_pages)
 
         for page_num in range(1, max_pages + 1):
             try:
@@ -109,14 +108,19 @@ class BumeranScraper:
             if jobs:
                 return jobs, "playwright"
 
-        # Fallback requests (raramente útil)
         html = self._fetch_requests(url)
-        if html and "Just a moment" not in html and "cf-browser-verification" not in html.lower():
+        if html and not self._is_challenge(html):
             jobs = self._extract_from_html(html)
             if jobs:
                 return jobs, "requests+html"
 
         return [], "none"
+
+    def _is_challenge(self, html: str) -> bool:
+        if not html:
+            return True
+        lower = html.lower()
+        return any(m in lower for m in ["just a moment", "cf-challenge", "cf-browser-verification", "checking if the site"])
 
     def _extract_with_playwright(self, url: str) -> List[Dict[str, Any]]:
         with sync_playwright() as p:
@@ -135,24 +139,24 @@ class BumeranScraper:
                 viewport={"width": 1366, "height": 768},
                 java_script_enabled=True,
             )
-            # Ocultar webdriver
             context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
 
             page = context.new_page()
             try:
                 page.goto(url, wait_until="domcontentloaded", timeout=60000)
-                # Esperar challenge o contenido
                 page.wait_for_timeout(3000)
-                # Si hay challenge, esperar un poco más
-                if "Just a moment" in page.content() or "cf-challenge" in page.content().lower():
-                    logger.info("  Challenge Cloudflare detectado, esperando...")
-                    page.wait_for_timeout(8000)
 
-                html = page.content()
-                jobs = self._extract_from_next_data(html)
+                # Esperar si hay challenge
+                content = page.content()
+                if self._is_challenge(content):
+                    logger.info("  Challenge Cloudflare detectado, esperando resolución...")
+                    page.wait_for_timeout(8000)
+                    content = page.content()
+
+                jobs = self._extract_from_next_data(content)
                 if jobs:
                     return jobs
-                return self._extract_from_html(html)
+                return self._extract_from_html(content)
             except PlaywrightTimeout:
                 logger.warning("Playwright timeout en %s", url)
                 return []
@@ -161,7 +165,6 @@ class BumeranScraper:
                 return []
             finally:
                 browser.close()
-        return []
 
     def _fetch_requests(self, url: str) -> Optional[str]:
         try:
@@ -196,20 +199,20 @@ class BumeranScraper:
             for v in obj.values():
                 if isinstance(v, list) and v and isinstance(v[0], dict):
                     keys = str(v[0].keys()).lower()
-                    if any(k in keys for k in ["titulo", "title", "url", "id", "aviso", "empresa"]):
+                    if any(k in keys for k in ["titulo", "title", "url", "id", "aviso", "empresa", "puesto"]):
                         found.extend(v)
                 else:
                     found.extend(self._find_jobs_recursive(v, depth + 1))
         elif isinstance(obj, list):
-            for item in obj[:15]:
+            for item in obj[:20]:
                 found.extend(self._find_jobs_recursive(item, depth + 1))
-        return found[:60]
+        return found[:80]
 
     def _extract_from_html(self, html: str) -> List[Dict[str, Any]]:
         soup = BeautifulSoup(html, "html.parser")
         results = []
         seen = set()
-        # Selectores heurísticos observados
+
         for a in soup.select("a[href*='/empleos/']"):
             href = a.get("href")
             if not href or href in seen or "/empleos/" not in href:
@@ -220,18 +223,19 @@ class BumeranScraper:
             parent = a.find_parent(["article", "div", "li", "section"]) or a
             text = parent.get_text(" ", strip=True)
             results.append(self._normalize_from_text(title, full_url, text))
+
         return results
 
     def _normalize(self, raw: Dict[str, Any]) -> Dict[str, Any]:
         return {
             "portal": "Bumeran",
-            "titulo": raw.get("titulo") or raw.get("title") or raw.get("nombre"),
+            "titulo": raw.get("titulo") or raw.get("title") or raw.get("nombre") or raw.get("puesto"),
             "empresa": raw.get("empresa") or raw.get("company") or raw.get("companyName") or "Confidencial",
             "ubicacion": raw.get("ubicacion") or raw.get("location") or raw.get("ciudad") or "Perú",
-            "modalidad": self._norm_modality(raw.get("modalidad") or raw.get("workMode")),
+            "modalidad": self._norm_modality(raw.get("modalidad") or raw.get("workMode") or raw.get("tipo")),
             "url_origen": self._abs_url(raw.get("url") or raw.get("url_origen") or ""),
             "fecha_publicacion": raw.get("fecha_publicacion") or raw.get("publishedAt") or raw.get("fecha"),
-            "descripcion_corta": (raw.get("descripcion_corta") or raw.get("snippet") or "")[:400],
+            "descripcion_corta": (raw.get("descripcion_corta") or raw.get("snippet") or raw.get("descripcion") or "")[:400],
         }
 
     def _normalize_from_text(self, title: Optional[str], url: str, text: str) -> Dict[str, Any]:
@@ -251,11 +255,11 @@ class BumeranScraper:
         if not text:
             return None
         t = str(text).lower()
-        if "remoto" in t:
+        if "remoto" in t or "remote" in t:
             return "Remoto"
-        if "híbrido" in t or "hibrido" in t:
+        if "híbrido" in t or "hibrido" in t or "hybrid" in t:
             return "Híbrido"
-        if "presencial" in t:
+        if "presencial" in t or "on-site" in t or "onsite" in t:
             return "Presencial"
         return str(text).strip()
 
@@ -272,16 +276,16 @@ class BumeranScraper:
 
     @staticmethod
     def _extract_location(text: str) -> Optional[str]:
-        for city in ["Lima", "Arequipa", "Cusco", "Trujillo", "Piura", "Callao", "Chiclayo", "San Isidro", "Miraflores", "Surco"]:
+        cities = ["Lima", "Arequipa", "Cusco", "Trujillo", "Piura", "Callao", "Chiclayo", "San Isidro", "Miraflores", "Surco", "Ate", "La Molina"]
+        for city in cities:
             if city in text:
                 return city
         return None
 
     @staticmethod
     def _extract_date(text: str) -> Optional[str]:
-        m = re.search(r"(Publicado|Actualizado|hace) [^
-.]+", text, re.I)
-        return m.group(0) if m else None
+        m = re.search(r"(Publicado|Actualizado|hace)\s+[\w\s]+", text, re.I)
+        return m.group(0).strip() if m else None
 
     def _abs_url(self, url: str) -> str:
         if url and not url.startswith("http"):
@@ -301,7 +305,7 @@ class BumeranScraper:
 
 
 if __name__ == "__main__":
-    print("=== BumeranScraper - Prueba ===")
+    print("=== BumeranScraper - Verificación ===")
     scraper = BumeranScraper(headless=True)
     jobs, metrics = scraper.get_jobs(keyword="desarrollador", max_pages=1)
     print(json.dumps(metrics, indent=2, ensure_ascii=False))

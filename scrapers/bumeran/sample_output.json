@@ -1,0 +1,15 @@
+{
+  "metrics": {
+    "total_extraidos": 0,
+    "errores": 0,
+    "tiempo_ejecucion": 0.0,
+    "motor_utilizado": "none",
+    "paginas_procesadas": 0,
+    "estado": "failed",
+    "fuente": "bumeran",
+    "timestamp": "2026-10-11T12:00:00+00:00",
+    "keyword": "desarrollador"
+  },
+  "jobs_sample": [],
+  "note": "Este archivo se genera automáticamente al ejecutar el scraper con save_sample=True. Reemplaza este contenido con resultados reales tras la primera ejecución exitosa."
+}

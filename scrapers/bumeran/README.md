@@ -1,41 +1,35 @@
-# Bumeran Scraper (Primer Empleo)
+# Bumeran Scraper (T5.5.BUM)
 
-Scraper híbrido síncrono completo para **bumeran.com.pe**.
+**Responsable:** Néstor  
+**Portal:** bumeran.com.pe  
+**Proyecto:** Primer Empleo
 
-## Análisis de Cloudflare
+Scraper híbrido síncrono listo para verificación y colaboración.
 
-- El sitio está protegido por **Cloudflare** (ASN 13335).
-- Peticiones HTTP simples (`requests`) reciben el **shell de Next.js** (HTML ~63KB, `<title>` vacío, sin ofertas).
-- Navegadores reales (Playwright) pueden superar el challenge "Just a moment..." y obtener el HTML hidratado con las ofertas.
-- `robots.txt` es permisivo para las rutas normales de búsqueda (`/empleos.html`, `/empleos-busqueda-*.html`).
-
-**Recomendación:** Usar Playwright como motor principal. El fallback a requests rara vez funciona.
-
-## Instalación
+## Clonar y verificar
 
 ```bash
+git clone -b feature/scraping https://github.com/aprend0/primer-empleo.git
+cd primer-empleo/scrapers/bumeran
+
 python -m venv .venv
 source .venv/bin/activate          # Linux/macOS
 # .venv\Scripts\activate          # Windows
 
 pip install -r requirements.txt
 playwright install chromium
-```
 
-## Uso rápido
-
-```bash
 python bumeran_scraper_sync.py
 ```
 
-```python
-from bumeran_scraper_sync import BumeranScraper
+El script genera `sample_output.json` con métricas y ejemplos de ofertas.
 
-scraper = BumeranScraper(headless=True)
-jobs, metrics = scraper.get_jobs(keyword="desarrollador", max_pages=2)
-print(metrics)
-print(jobs[0] if jobs else "Sin resultados")
-```
+## Análisis de Cloudflare
+
+- Protegido por Cloudflare (ASN 13335).
+- `requests` recibe el shell de Next.js (sin datos).
+- Playwright supera el challenge y obtiene el HTML hidratado.
+- `robots.txt` es permisivo para rutas normales de búsqueda.
 
 ## Esquema de salida
 
@@ -52,25 +46,17 @@ print(jobs[0] if jobs else "Sin resultados")
 }
 ```
 
-## Métricas (tabla scraper_runs)
+## Métricas (scraper_runs)
 
-- `total_extraidos`
-- `errores`
-- `tiempo_ejecucion`
+- `total_extraidos`, `errores`, `tiempo_ejecucion`
 - `motor_utilizado` (playwright / requests+html / none)
-- `paginas_procesadas`
-- `estado` (success / partial / failed)
+- `paginas_procesadas`, `estado` (success / partial / failed)
 
-## Cómo colaborar / mejorar
+## Colaborar
 
 1. Clona la rama `feature/scraping`.
-2. Ejecuta el scraper y observa los logs.
-3. Si retorna 0 resultados:
-   - Abre Bumeran en el navegador → DevTools → Network → Fetch/XHR.
-   - Localiza el endpoint real (ej. `searchNormalizado` o similar).
-   - Actualiza `INTERNAL_API_CANDIDATES` o la lógica de interceptación en Playwright.
-4. Abre un Pull Request hacia `develop` o `main`.
+2. Ejecuta y revisa logs + `sample_output.json`.
+3. Si retorna 0 resultados, inspecciona Network tab en el navegador.
+4. Abre un Pull Request.
 
-## Plan B (Gantt T5.5)
-
-Si `estado == "failed"`, pausar el conector Bumeran y continuar con los demás portales.
+**Nota:** El repositorio debe estar público para clonación libre. Si es privado, el owner puede hacerlo público en Settings → General → Danger Zone.
